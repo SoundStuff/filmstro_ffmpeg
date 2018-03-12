@@ -66,6 +66,7 @@ FFmpegVideoReader::~FFmpegVideoReader()
 {
     decoder.stopThread (500);
     closeMovieFile ();
+  
     masterReference.clear();
 }
 
@@ -227,7 +228,7 @@ void FFmpegVideoReader::getNextAudioBlock (const juce::AudioSourceChannelInfo &b
     // this triggers also reading of new video frame
     decoder.setCurrentPTS (static_cast<double>(nextReadPos) / sampleRate);
 #ifdef DEBUG_LOG_PACKETS
-    DBG ("Play audio block: " + String (nextReadPos) + " PTS: " + String (static_cast<double>(nextReadPos) / sampleRate));
+    //DBG ("Play audio block: " + String (nextReadPos) + " PTS: " + String (static_cast<double>(nextReadPos) / sampleRate));
 #endif // DEBUG_LOG_PACKETS
 
     if (audioFifo.getNumReady() >= bufferToFill.numSamples) {
@@ -483,11 +484,11 @@ int FFmpegVideoReader::DecoderThread::decodeAudioPacket (AVPacket packet)
         double  framePTSsecs = static_cast<double> (framePTS) / audioContext->sample_rate;
 
 #ifdef DEBUG_LOG_PACKETS
-        DBG ("Stream " + String (packet.stream_index) +
-             " (Audio) " +
-             " DTS: " + String (packet.dts) +
-             " PTS: " + String (packet.pts) +
-             " Frame PTS: " + String (framePTS));
+//        DBG ("Stream " + String (packet.stream_index) +
+//             " (Audio) " +
+//             " DTS: " + String (packet.dts) +
+//             " PTS: " + String (packet.pts) +
+//             " Frame PTS: " + String (framePTS));
 #endif /* DEBUG_LOG_PACKETS */
 
         /* Some audio decoders decode only part of the packet, and have to be
@@ -530,17 +531,26 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
         AVFrame* frame = videoFrames [videoFifoWrite].second;
 
         if (avcodec_decode_video2 (videoContext, frame, &got_picture, &packet) > 0) {
-            int64_t pts = av_frame_get_best_effort_timestamp (frame);
-
-            AVRational timeBase = av_make_q (1, AV_TIME_BASE);
-            if (isPositiveAndBelow(videoStreamIdx, static_cast<int> (formatContext->nb_streams))) {
-                timeBase = formatContext->streams [videoStreamIdx]->time_base;
-            }
-            pts_sec = av_q2d (timeBase) * pts;
-            if (pts_sec >= 0.0) {
-                videoFrames [videoFifoWrite].first = pts_sec;
-                videoFifoWrite = ++videoFifoWrite % videoFrames.size();
-            }
+//          int sendPacketResult;
+//          if ((sendPacketResult = avcodec_send_packet(videoContext, &packet)) == 0 || sendPacketResult == AVERROR(EAGAIN)) {
+          
+            
+//            while (avcodec_receive_frame(videoContext, frame) != AVERROR(EAGAIN))
+//            {
+              int64_t pts = av_frame_get_best_effort_timestamp (frame);
+              
+              AVRational timeBase = av_make_q (1, AV_TIME_BASE);
+              if (isPositiveAndBelow(videoStreamIdx, static_cast<int> (formatContext->nb_streams))) {
+                  timeBase = formatContext->streams [videoStreamIdx]->time_base;
+              }
+              pts_sec = av_q2d (timeBase) * pts;
+//              if (/*pts_sec >= 0.0 && */pts_sec >= currentPTS.load()) {
+              if (pts_sec >= double(formatContext->streams[videoStreamIdx]->start_time))
+              {
+                  videoFrames [videoFifoWrite].first = pts_sec;
+                  videoFifoWrite = ++videoFifoWrite % videoFrames.size();
+              }
+            
 
 #ifdef DEBUG_LOG_PACKETS
             DBG ("Stream " + String (packet.stream_index) +
@@ -551,7 +561,23 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
                  " in ms: " + String (pts_sec) +
                  " timebase: " + String (av_q2d(timeBase)));
 #endif /* DEBUG_LOG_PACKETS */
+//            }
 
+        }
+        else
+        {
+          /* @return 0 on success, otherwise negative error code:
+           *      AVERROR(EAGAIN):   input is not accepted in the current state - user
+           *                         must read output with avcodec_receive_frame() (once
+           *                         all output is read, the packet should be resent, and
+           *                         the call will not fail with EAGAIN).
+           *      AVERROR_EOF:       the decoder has been flushed, and no new packets can
+           *                         be sent to it (also returned if more than 1 flush
+           *                         packet is sent)
+           *      AVERROR(EINVAL):   codec not opened, it is an encoder, or requires flush
+           *      AVERROR(ENOMEM):   failed to add packet to internal queue, or similar
+           *      other errors: legitimate decoding errors
+           */
         }
     }
     return pts_sec;
@@ -559,14 +585,15 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
 
 void FFmpegVideoReader::DecoderThread::run()
 {
+  double t = double(formatContext->streams[videoStreamIdx]->start_time);
     int error = 0;
     while (!threadShouldExit()) {
         int freeVideoFrames = (videoFrames.size() + videoFifoWrite - videoFifoRead) % videoFrames.size();
         if (audioFifo.getFreeSpace() > 2048 && (audioFifo.getNumReady() < 4096 || freeVideoFrames < videoFrames.size() - 2)) {
 
 #ifdef DEBUG_LOG_PACKETS
-            DBG ("Audio: " + String (audioFifo.getNumReady()) + " ready, "
-                 + String (audioFifo.getFreeSpace()) + " free");
+            //DBG ("Audio: " + String (audioFifo.getNumReady()) + " ready, "
+            //     + String (audioFifo.getFreeSpace()) + " free");
 #endif /* DEBUG_LOG_PACKETS */
 
             AVPacket packet;
@@ -604,7 +631,13 @@ void FFmpegVideoReader::DecoderThread::setCurrentPTS (const double pts, bool see
 {
     if (audioContext && seek) {
         int64_t readPos = pts * audioContext->sample_rate;
-        av_seek_frame (formatContext, audioStreamIdx, readPos, 0);
+        int result = av_seek_frame (formatContext, audioStreamIdx, readPos, AVSEEK_FLAG_BACKWARD);
+        if (result < 0)
+        {
+          jassertfalse;
+        }
+        avcodec_flush_buffers(videoContext);
+      
         // invalidate all FIFOs
         audioFifo.reset();
         videoFifoWrite = 0;
@@ -627,7 +660,8 @@ void FFmpegVideoReader::DecoderThread::setCurrentPTS (const double pts, bool see
         return;
     }
 
-    auto read = videoFifoRead;
+  //SoundStuff: replaced ambiguous '''auto read = videoFifoRead;'''
+  int read = videoFifoRead.load();
     auto i=0;
 
     while ((videoFrames [(read + i) % videoFrames.size()].first < pts) && i < (availableFrames - 1)) {

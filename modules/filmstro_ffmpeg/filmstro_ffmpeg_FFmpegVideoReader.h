@@ -302,6 +302,7 @@ private:
 
     DecoderThread                       decoder;
 
+    //SoundStuff: switched to std::weak_ptr
     // use WeakReference so that removing a source doesn't lead to disaster
     juce::WeakReference<FFmpegVideoReader>::Master masterReference;
     friend class juce::WeakReference<FFmpegVideoReader>;

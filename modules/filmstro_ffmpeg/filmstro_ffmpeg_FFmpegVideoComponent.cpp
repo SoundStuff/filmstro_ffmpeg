@@ -105,6 +105,7 @@ void FFmpegVideoComponent::paint (juce::Graphics& g)
                        (getHeight() - frameBuffer.getHeight()) * 0.5);
     }
     else {
+        g.setColour(Colours::white);
         g.drawFittedText ("No VideoSource connected", getLocalBounds(), juce::Justification::centred, 1);
     }
 }
@@ -113,7 +114,7 @@ void FFmpegVideoComponent::paint (juce::Graphics& g)
 void FFmpegVideoComponent::displayNewFrame (const AVFrame* frame)
 {
     if (dirty) {
-        DBG ("Frame not painted: " + String (av_frame_get_best_effort_timestamp (currentFrame)));
+        DBG ("Frame not painted: " + String (av_frame_get_best_effort_timestamp (frame)));
     }
     currentFrame = frame;
     dirty = true;
@@ -130,16 +131,16 @@ void FFmpegVideoComponent::setVideoReader (FFmpegVideoReader* source)
 {
     if (videoSource)
         videoSource->removeVideoListener (this);
-
+  
     videoSource = source;
-
+  
     if (videoSource)
         videoSource->addVideoListener(this);
 
     dirty = true;
 }
 
-FFmpegVideoReader* FFmpegVideoComponent::getVideoReader () const
+FFmpegVideoReader * FFmpegVideoComponent::getVideoReader () const
 {
     return videoSource;
 }

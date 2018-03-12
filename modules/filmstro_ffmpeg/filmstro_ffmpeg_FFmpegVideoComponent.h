@@ -72,10 +72,10 @@ public:
     void videoSizeChanged (const int width, const int height, const AVPixelFormat) override;
 
     /** Set a video source for the component */
-    void setVideoReader (FFmpegVideoReader* source);
+    void setVideoReader (FFmpegVideoReader * source);
 
-    /** Get the video source for the component */
-    FFmpegVideoReader* getVideoReader () const;
+    /** Get the video source for the component - TODO: this locks the weak ptr - should it? */
+    FFmpegVideoReader * getVideoReader () const;
 
 private:
     /** Format the timecode in seconds */
