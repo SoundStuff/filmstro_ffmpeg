@@ -72,17 +72,17 @@ public:
     void videoSizeChanged (const int width, const int height, const AVPixelFormat) override;
 
     /** Set a video source for the component */
-    void setVideoReader (FFmpegVideoReader * source);
+    void setVideoReader (std::shared_ptr<FFmpegVideoReader> source);
 
     /** Get the video source for the component - TODO: this locks the weak ptr - should it? */
-    FFmpegVideoReader * getVideoReader () const;
+    std::shared_ptr<FFmpegVideoReader> getVideoReader () const;
 
 private:
     /** Format the timecode in seconds */
     juce::String    formatTimeCode (const double tc);
 
     /** Reference to the FFmpegVideoReader to provide video frames */
-    juce::WeakReference<FFmpegVideoReader>  videoSource;
+    std::weak_ptr<FFmpegVideoReader>  videoSourceWeak;
 
     const AVFrame*                          currentFrame;
 

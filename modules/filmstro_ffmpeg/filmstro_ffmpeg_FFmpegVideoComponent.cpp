@@ -65,6 +65,7 @@ FFmpegVideoComponent::~FFmpegVideoComponent ()
 
 void FFmpegVideoComponent::resized ()
 {
+    auto videoSource = videoSourceWeak.lock();
     if (videoSource) {
         double aspectRatio = videoSource->getVideoAspectRatio() * videoSource->getVideoPixelAspect();
         if (aspectRatio > 0) {
@@ -98,6 +99,8 @@ void FFmpegVideoComponent::timerCallback ()
 void FFmpegVideoComponent::paint (juce::Graphics& g)
 {
     g.fillAll (Colours::black);
+  
+    auto videoSource = videoSourceWeak.lock();
     if (videoSource && currentFrame && frameBuffer.isValid()) {
         videoScaler.convertFrameToImage (frameBuffer, currentFrame);
         g.drawImageAt (frameBuffer,
@@ -127,12 +130,14 @@ void FFmpegVideoComponent::videoSizeChanged (const int width, const int height, 
     dirty = true;
 }
 
-void FFmpegVideoComponent::setVideoReader (FFmpegVideoReader* source)
+void FFmpegVideoComponent::setVideoReader (std::shared_ptr<FFmpegVideoReader> source)
 {
+    auto videoSource = videoSourceWeak.lock();
     if (videoSource)
         videoSource->removeVideoListener (this);
   
-    videoSource = source;
+  videoSourceWeak = source;
+    videoSource = videoSourceWeak.lock();
   
     if (videoSource)
         videoSource->addVideoListener(this);
@@ -140,7 +145,7 @@ void FFmpegVideoComponent::setVideoReader (FFmpegVideoReader* source)
     dirty = true;
 }
 
-FFmpegVideoReader * FFmpegVideoComponent::getVideoReader () const
+std::shared_ptr<FFmpegVideoReader> FFmpegVideoComponent::getVideoReader () const
 {
-    return videoSource;
+    return videoSourceWeak.lock();
 }

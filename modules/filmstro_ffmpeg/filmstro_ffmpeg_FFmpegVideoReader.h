@@ -305,8 +305,8 @@ private:
 
     //SoundStuff: switched to std::weak_ptr
     // use WeakReference so that removing a source doesn't lead to disaster
-    juce::WeakReference<FFmpegVideoReader>::Master masterReference;
-    friend class juce::WeakReference<FFmpegVideoReader>;
+    //juce::WeakReference<FFmpegVideoReader>::Master masterReference;
+    //friend class juce::WeakReference<FFmpegVideoReader>;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FFmpegVideoReader)
 };

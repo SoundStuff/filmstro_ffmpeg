@@ -67,7 +67,7 @@ FFmpegVideoReader::~FFmpegVideoReader()
     decoder.stopThread (500);
     closeMovieFile ();
   
-    masterReference.clear();
+    //masterReference.clear();
 }
 
 // ==============================================================================
