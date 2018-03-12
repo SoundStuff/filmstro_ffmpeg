@@ -167,6 +167,7 @@ public:
         AVFrame*            audioFrame;
 
         std::atomic<double> currentPTS;
+        std::atomic<bool> flushBuffers;
 
         juce::ListenerList<FFmpegVideoListener> videoListeners;
 

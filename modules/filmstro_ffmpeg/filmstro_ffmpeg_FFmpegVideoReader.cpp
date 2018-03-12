@@ -228,7 +228,7 @@ void FFmpegVideoReader::getNextAudioBlock (const juce::AudioSourceChannelInfo &b
     // this triggers also reading of new video frame
     decoder.setCurrentPTS (static_cast<double>(nextReadPos) / sampleRate);
 #ifdef DEBUG_LOG_PACKETS
-    //DBG ("Play audio block: " + String (nextReadPos) + " PTS: " + String (static_cast<double>(nextReadPos) / sampleRate));
+    DBG ("Play audio block: " + String (nextReadPos) + " PTS: " + String (static_cast<double>(nextReadPos) / sampleRate));
 #endif // DEBUG_LOG_PACKETS
 
     if (audioFifo.getNumReady() >= bufferToFill.numSamples) {
@@ -384,6 +384,8 @@ bool FFmpegVideoReader::DecoderThread::loadMovieFile (const juce::File& inputFil
 
     videoListeners.call (&FFmpegVideoListener::videoFileChanged, inputFile);
 
+    flushBuffers = false;
+  
     startThread ();
 
     return true;
@@ -484,11 +486,11 @@ int FFmpegVideoReader::DecoderThread::decodeAudioPacket (AVPacket packet)
         double  framePTSsecs = static_cast<double> (framePTS) / audioContext->sample_rate;
 
 #ifdef DEBUG_LOG_PACKETS
-//        DBG ("Stream " + String (packet.stream_index) +
-//             " (Audio) " +
-//             " DTS: " + String (packet.dts) +
-//             " PTS: " + String (packet.pts) +
-//             " Frame PTS: " + String (framePTS));
+        DBG ("Stream " + String (packet.stream_index) +
+             " (Audio) " +
+             " DTS: " + String (packet.dts) +
+             " PTS: " + String (packet.pts) +
+             " Frame PTS: " + String (framePTS));
 #endif /* DEBUG_LOG_PACKETS */
 
         /* Some audio decoders decode only part of the packet, and have to be
@@ -545,7 +547,7 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
               }
               pts_sec = av_q2d (timeBase) * pts;
 //              if (/*pts_sec >= 0.0 && */pts_sec >= currentPTS.load()) {
-              if (pts_sec >= double(formatContext->streams[videoStreamIdx]->start_time))
+              if (pts_sec >= currentPTS.load())//double(formatContext->streams[videoStreamIdx]->start_time))
               {
                   videoFrames [videoFifoWrite].first = pts_sec;
                   videoFifoWrite = ++videoFifoWrite % videoFrames.size();
@@ -585,17 +587,23 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
 
 void FFmpegVideoReader::DecoderThread::run()
 {
-  double t = double(formatContext->streams[videoStreamIdx]->start_time);
     int error = 0;
     while (!threadShouldExit()) {
         int freeVideoFrames = (videoFrames.size() + videoFifoWrite - videoFifoRead) % videoFrames.size();
         if (audioFifo.getFreeSpace() > 2048 && (audioFifo.getNumReady() < 4096 || freeVideoFrames < videoFrames.size() - 2)) {
 
 #ifdef DEBUG_LOG_PACKETS
-            //DBG ("Audio: " + String (audioFifo.getNumReady()) + " ready, "
-            //     + String (audioFifo.getFreeSpace()) + " free");
+            DBG ("Audio: " + String (audioFifo.getNumReady()) + " ready, "
+                 + String (audioFifo.getFreeSpace()) + " free");
 #endif /* DEBUG_LOG_PACKETS */
 
+            if (flushBuffers)
+            {
+              avcodec_flush_buffers(videoContext);
+              flushBuffers = false;
+            }
+
+          
             AVPacket packet;
             // initialize packet, set data to NULL, let the demuxer fill it
             packet.data = NULL;
@@ -603,7 +611,7 @@ void FFmpegVideoReader::DecoderThread::run()
             av_init_packet (&packet);
 
             error = av_read_frame (formatContext, &packet);
-
+        
             if (error >= 0) {
                 if (packet.stream_index == audioStreamIdx) {
                     decodeAudioPacket (packet);
@@ -631,12 +639,17 @@ void FFmpegVideoReader::DecoderThread::setCurrentPTS (const double pts, bool see
 {
     if (audioContext && seek) {
         int64_t readPos = pts * audioContext->sample_rate;
+      
+        //SoundStuff: using AVSEEK_FLAG_BACKWARD and asserting on error
         int result = av_seek_frame (formatContext, audioStreamIdx, readPos, AVSEEK_FLAG_BACKWARD);
         if (result < 0)
         {
           jassertfalse;
         }
-        avcodec_flush_buffers(videoContext);
+      
+        //SoundStuff: flushing the videoContext buffer helps prevent stuck frames
+        //avcodec_flush_buffers(videoContext);
+        flushBuffers = true;
       
         // invalidate all FIFOs
         audioFifo.reset();
