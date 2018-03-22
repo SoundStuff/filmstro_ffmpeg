@@ -289,7 +289,7 @@ private:
 
     bool        looping;
 
-    int         sampleRate;
+    double      sampleRate;
 
     double      framesPerSec;
 

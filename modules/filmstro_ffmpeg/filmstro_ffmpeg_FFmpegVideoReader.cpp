@@ -49,11 +49,11 @@
 
 // enable this to print a DBG statement for each packet containing stream ID and timestamp
 //#define DEBUG_LOG_PACKETS
-
+//#define DEBUG_LOG_VIDEO_PACKETS
 
 FFmpegVideoReader::FFmpegVideoReader (const int audioFifoSize, const int videoFifoSize)
  :  looping                 (false),
-    sampleRate              (0),
+    sampleRate              (0.0),
     resampleFactor          (1.0),
     currentTimeStamp        (0.0),
     nextReadPos             (0),
@@ -261,7 +261,7 @@ void FFmpegVideoReader::setNextReadPosition (juce::int64 newPosition)
 {
     nextReadPos = newPosition;
     if (sampleRate > 0) {
-        decoder.setCurrentPTS (nextReadPos / sampleRate, true);
+        decoder.setCurrentPTS (static_cast<double> (nextReadPos) / sampleRate, true);
     }
 }
 
@@ -533,12 +533,7 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
         AVFrame* frame = videoFrames [videoFifoWrite].second;
 
         if (avcodec_decode_video2 (videoContext, frame, &got_picture, &packet) > 0) {
-//          int sendPacketResult;
-//          if ((sendPacketResult = avcodec_send_packet(videoContext, &packet)) == 0 || sendPacketResult == AVERROR(EAGAIN)) {
-          
-            
-//            while (avcodec_receive_frame(videoContext, frame) != AVERROR(EAGAIN))
-//            {
+
               int64_t pts = av_frame_get_best_effort_timestamp (frame);
               
               AVRational timeBase = av_make_q (1, AV_TIME_BASE);
@@ -546,28 +541,29 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
                   timeBase = formatContext->streams [videoStreamIdx]->time_base;
               }
               pts_sec = av_q2d (timeBase) * pts;
-//              if (/*pts_sec >= 0.0 && */pts_sec >= currentPTS.load()) {
-              if (pts_sec >= currentPTS.load())//double(formatContext->streams[videoStreamIdx]->start_time))
+              //DBG(String("Packet PTS: {0} - currentPTS: {1}").replace("{0}", String(pts_sec)).replace("{1}", String(currentPTS.load())));
+              if (pts_sec >= currentPTS.load() - 2*av_q2d(timeBase)) //double(formatContext->streams[videoStreamIdx]->start_time))
               {
                   videoFrames [videoFifoWrite].first = pts_sec;
                   videoFifoWrite = ++videoFifoWrite % videoFrames.size();
               }
             
+#ifdef DEBUG_LOG_VIDEO_PACKETS
+                  DBG ("Stream " + String (packet.stream_index) +
+                       " (Video) " +
+                       " DTS: " + String (packet.dts) +
+                       " PTS: " + String (packet.pts) +
+                       " best effort PTS: " + String (pts) +
+                       " in ms: " + String (pts_sec) +
+                       " timebase: " + String (av_q2d(timeBase)));
+#endif /* DEBUG_LOG_VIDEO_PACKETS */
 
-#ifdef DEBUG_LOG_PACKETS
-            DBG ("Stream " + String (packet.stream_index) +
-                 " (Video) " +
-                 " DTS: " + String (packet.dts) +
-                 " PTS: " + String (packet.pts) +
-                 " best effort PTS: " + String (pts) +
-                 " in ms: " + String (pts_sec) +
-                 " timebase: " + String (av_q2d(timeBase)));
-#endif /* DEBUG_LOG_PACKETS */
-//            }
+
 
         }
         else
         {
+          jassertfalse;
           /* @return 0 on success, otherwise negative error code:
            *      AVERROR(EAGAIN):   input is not accepted in the current state - user
            *                         must read output with avcodec_receive_frame() (once
@@ -658,8 +654,10 @@ void FFmpegVideoReader::DecoderThread::setCurrentPTS (const double pts, bool see
         for (int i=0; i < videoFrames.size(); ++i) {
             videoFrames [i].first = 0.0;
         }
+        currentPTS = pts; //TODO: testing...
         waitForPacket.signal();
-        Thread::wait (20);
+        Thread::wait (200); //TODO: this needs to use an atomic_flag triggered on when the thread has
+                            //decoded the frame at pts
     }
 
     videoListeners.call (&FFmpegVideoListener::presentationTimestampChanged, pts);
@@ -796,3 +794,11 @@ AVCodecContext* FFmpegVideoReader::DecoderThread::getSubtitleContext () const
     return subtitleContext;
 }
 
+//HAL NOTES
+/*
+ int sendPacketResult;
+ if ((sendPacketResult = avcodec_send_packet(videoContext, &packet)) == 0 || sendPacketResult == AVERROR(EAGAIN)) { while (avcodec_receive_frame(videoContext, frame) != AVERROR(EAGAIN))
+  {
+  }
+ }
+*/
