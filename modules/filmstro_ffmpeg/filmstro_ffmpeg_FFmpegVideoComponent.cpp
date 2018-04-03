@@ -109,7 +109,7 @@ void FFmpegVideoComponent::paint (juce::Graphics& g)
     }
     else {
         g.setColour(Colours::white);
-        g.drawFittedText ("No VideoSource connected", getLocalBounds(), juce::Justification::centred, 1);
+        g.drawFittedText ("No Video Loaded", getLocalBounds(), juce::Justification::centred, 1);
     }
 }
 
