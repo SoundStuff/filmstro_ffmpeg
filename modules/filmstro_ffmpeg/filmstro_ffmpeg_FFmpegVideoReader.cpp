@@ -50,7 +50,7 @@
 // enable this to print a DBG statement for each packet containing stream ID and timestamp
 //#define DEBUG_LOG_PACKETS
 //#define DEBUG_LOG_VIDEO_PACKETS
-//#define DEBUG_LOGIC_FLOW
+//#define DEBUG_LOGIC_FLOW  //THIS WILL LOG ON getNextAudioBlock() - USE WISELY
 
 FFmpegVideoReader::FFmpegVideoReader (const int audioFifoSize, const int videoFifoSize)
 :  looping                 (false),
@@ -324,7 +324,8 @@ subtitleContext     (nullptr),
 videoStreamIdx      (-1),
 audioStreamIdx      (-1),
 subtitleStreamIdx   (-1),
-currentPTS          (0)
+currentPTS          (0),
+_lastPTS            (-1)
 {
     av_register_all();
     
@@ -388,8 +389,9 @@ bool FFmpegVideoReader::DecoderThread::loadMovieFile (const juce::File& inputFil
     videoListeners.call (&FFmpegVideoListener::videoFileChanged, inputFile);
     
     flushBuffers = false;
-    
-    startThread ();
+  
+    //decoder thread should have a decent priority
+    startThread (8);
     
     return true;
 }
@@ -538,6 +540,10 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
         if (avcodec_decode_video2 (videoContext, frame, &got_picture, &packet) > 0) {
             
             int64_t pts = av_frame_get_best_effort_timestamp (frame);
+            //check for bad pts... unless dts is less than 0
+            if (packet.dts >= 0 && (pts == AV_NOPTS_VALUE || pts < 0))
+                pts = packet.pts;
+            
             
             AVRational timeBase = av_make_q (1, AV_TIME_BASE);
             if (isPositiveAndBelow(videoStreamIdx, static_cast<int> (formatContext->nb_streams))) {
@@ -546,18 +552,18 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
             pts_sec = av_q2d (timeBase) * static_cast<double>(pts);
             
             
-            if (pts_sec >= currentPTS.load() - 0.1)
+            if (pts_sec >= 0.0)
             {
                 videoFrames [videoFifoWrite].first = pts_sec;
                 videoFifoWrite = ++videoFifoWrite % videoFrames.size();
-                
-                if (_pushFrameOnDecode && pts_sec >= currentPTS.load())
+              
+                if (_pushFrameOnDecode && pts_sec >=  currentPTS.load() && _seeking == false)
+                //_seeking should be reset before pushing; if it's true then we're still not ready to push
                 {
-                    pushLatestFrame();
-                    _pushFrameOnDecode = false;
+                    if (pushLatestFrame())
+                        _pushFrameOnDecode = false;
                 }
             }
-            
             
             
 #ifdef DEBUG_LOG_VIDEO_PACKETS
@@ -598,21 +604,25 @@ void FFmpegVideoReader::DecoderThread::run()
     int error = 0;
     _pushFrameOnDecode = true;
     while (!threadShouldExit()) {
-        int freeVideoFrames = (videoFrames.size() + videoFifoWrite - videoFifoRead) % videoFrames.size();
+        int decodedFrames = (videoFrames.size() + videoFifoWrite - videoFifoRead) % videoFrames.size();
         
-        if (flushBuffers)
-        {
-            avcodec_flush_buffers(videoContext);
-            flushBuffers = false;
-        }
-        
+//        if (flushBuffers)
+//        {
+//            avcodec_flush_buffers(videoContext);
+//            flushBuffers = false;
+//        }
+      
         //if we're seeking!
         if (audioContext && _seeking) {
 #ifdef DEBUG_LOGIC_FLOW
             DBG(String("Decoder Logic: SEEKING to {0}").replace("{0}", String(currentPTS.load())));
 #endif
+            //HAL: seek to the desired position and go back a few frames...
+            int64_t readPos = (currentPTS.load() - (0.1)) * audioContext->sample_rate;
+            //videoContext->ticks_per_frame * AV_TIME_BASE ??
             
-            int64_t readPos = currentPTS.load() * audioContext->sample_rate;
+            //AV_TIME_BASE
+            //int flags = (targetPosition is before currentPosition) ? AVSEEK_FLAG_BACKWARD : 0;
             
             //SoundStuff: AVSEEK_FLAG_BACKWARD will seek to a keyframe before the desired position
             int result = av_seek_frame (formatContext, audioStreamIdx, readPos, AVSEEK_FLAG_BACKWARD);
@@ -621,19 +631,17 @@ void FFmpegVideoReader::DecoderThread::run()
                 jassertfalse;
             }
             _seeking = false;
+            avcodec_flush_buffers(videoContext);
         }
         
     
-        if (audioFifo.getFreeSpace() > 2048 && (audioFifo.getNumReady() < 4096 || freeVideoFrames < videoFrames.size() - 2)) {
+        if (audioFifo.getFreeSpace() > 2048 && (audioFifo.getNumReady() < 4096 || decodedFrames < videoFrames.size() - 2)) {
             
 #ifdef DEBUG_LOG_PACKETS
             DBG ("Audio: " + String (audioFifo.getNumReady()) + " ready, "
                  + String (audioFifo.getFreeSpace()) + " free");
 #endif /* DEBUG_LOG_PACKETS */
-            
-            
-            
-            
+          
             AVPacket packet;
             // initialize packet, set data to NULL, let the demuxer fill it
             packet.data = NULL;
@@ -656,7 +664,7 @@ void FFmpegVideoReader::DecoderThread::run()
             av_packet_unref (&packet);
         }
         else {
-            waitForPacket.wait (20);
+            waitForPacket.wait (10);
         }
         if (error < 0) {
             // probably EOF, but keep checking from time to time
@@ -665,9 +673,10 @@ void FFmpegVideoReader::DecoderThread::run()
     }
 }
 
+//potentially called from any thread
 void FFmpegVideoReader::DecoderThread::setCurrentPTS (const double pts, bool seek)
 {
-    //assume!!! this can be called from any thread -
+    
     videoListeners.call (&FFmpegVideoListener::presentationTimestampChanged, pts);
     
     if (seek)
@@ -692,42 +701,43 @@ void FFmpegVideoReader::DecoderThread::setCurrentPTS (const double pts, bool see
     else
     {
         currentPTS = pts;
-        pushLatestFrame();
+        //don't update if we're waiting for the decoder to catch up
+        if (_pushFrameOnDecode == false)
+          pushLatestFrame();
     }
 }
 
-void FFmpegVideoReader::DecoderThread::pushLatestFrame()
+//potentially called from any thread
+bool FFmpegVideoReader::DecoderThread::pushLatestFrame()
 {
 #ifdef DEBUG_LOGIC_FLOW
     DBG(String("Decoder Logic: Attempting to push a decoded frame for pts: {0}").replace("{0}", String(currentPTS.load())));
 #endif
-    
+  
     auto availableFrames = (videoFrames.size() + videoFifoWrite - videoFifoRead) % videoFrames.size();
     if (availableFrames < 1) {
         // No frame read!
 #ifdef DEBUG_LOGIC_FLOW
         DBG("Decoder Logic: No decoded frames available!");
 #endif
-        return;
+        return false;
     }
     
     //SoundStuff: replaced ambiguous '''auto read = videoFifoRead;'''
-    /*
+    
     int read = videoFifoRead.load();
-    auto iter = 0;
-    
-    
+
     // find best frame PTS < currentPTS
     auto bestFramePos = -1;
     for (auto i = 0; i < availableFrames; i++)
     {
         int iterFrame = (read + i) % videoFrames.size();
-        if (videoFrames[iterFrame].first < currentPTS.load())
+        if (videoFrames[iterFrame].first <= currentPTS.load())
         {
 #ifdef DEBUG_LOGIC_FLOW
             if (bestFramePos != -1) //if a previous candidate frame was found
             {
-                DBG (String("Decode Logic: SKIPPED frame with pts: {0}")
+                DBG (String("Decoder Logic: SKIPPED frame with pts: {0}")
                  .replace("{0}", String(videoFrames[iterFrame].first)));
             }
 #endif
@@ -735,10 +745,10 @@ void FFmpegVideoReader::DecoderThread::pushLatestFrame()
         }
     }
     
-    if (bestFramePos > -1)
+    if (bestFramePos > -1 && videoFrames[bestFramePos].first != _lastPTS.load())
     {
 #ifdef DEBUG_LOGIC_FLOW
-        DBG (String("Decode Logic: CANDIDATE frame found with pts: {0}")
+        DBG (String("Decoder Logic: CANDIDATE frame found with pts: {0}")
              .replace("{0}", String(videoFrames[bestFramePos].first)));
 #endif
         if (bestFramePos > 1) {
@@ -747,7 +757,8 @@ void FFmpegVideoReader::DecoderThread::pushLatestFrame()
                  .replace("{0}", String (bestFramePos-1)));
 #endif
         }
-        videoFifoRead = (read + bestFramePos) % videoFrames.size();
+        _lastPTS = videoFrames[bestFramePos].first;
+        videoFifoRead = (bestFramePos) % videoFrames.size();
         AVFrame* nextFrame = videoFrames [videoFifoRead].second;
         videoListeners.call (&FFmpegVideoListener::displayNewFrame, nextFrame);
 #ifdef DEBUG_LOGIC_FLOW
@@ -755,32 +766,36 @@ void FFmpegVideoReader::DecoderThread::pushLatestFrame()
             .replace("{0}", String(videoFrames[videoFifoRead].first))
             .replace("{1}", String(currentPTS.load())));
 #endif
+      
+      return true;
     }
     else
     {
 #ifdef DEBUG_LOGIC_FLOW
         DBG("Decoder Logic: FAILED - could not find suitable frame");
 #endif
+      
+      return false;
     }
-     */
+     
     
     
-    int read = videoFifoRead.load();
-    auto i=0;
-    
-    while ((videoFrames [(read + i) % videoFrames.size()].first < currentPTS.load()) && i < (availableFrames - 1)) {
-        ++i;
-    }
-    
-    if (i > 0) {
-        if (i > 1) {
-            DBG ("Dropped " + String (i-1) + " frame(s)");
-        }
-        videoFifoRead = (read + i) % videoFrames.size();
-        AVFrame* nextFrame = videoFrames [videoFifoRead].second;
-        
-        videoListeners.call (&FFmpegVideoListener::displayNewFrame, nextFrame);
-    }
+//    int read = videoFifoRead.load();
+//    auto i=0;
+//    
+//    while ((videoFrames [(read + i) % videoFrames.size()].first < currentPTS.load()) && i < (availableFrames - 1)) {
+//        ++i;
+//    }
+//    
+//    if (i > 0) {
+//        if (i > 1) {
+//            DBG ("Dropped " + String (i-1) + " frame(s)");
+//        }
+//        videoFifoRead = (read + i) % videoFrames.size();
+//        AVFrame* nextFrame = videoFrames [videoFifoRead].second;
+//        
+//        videoListeners.call (&FFmpegVideoListener::displayNewFrame, nextFrame);
+//    }
 }
 
 double FFmpegVideoReader::DecoderThread::getCurrentPTS () const

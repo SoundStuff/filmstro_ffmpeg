@@ -92,7 +92,7 @@ public:
         void setCurrentPTS (const double pts, bool seek = false);
         
         /** **/
-        void pushLatestFrame();
+        bool pushLatestFrame();
         
         /** returns the presentation timestamp the video is synchronised to */
         double getCurrentPTS () const;
@@ -170,6 +170,7 @@ public:
         AVFrame*            audioFrame;
         
         std::atomic<double> currentPTS;
+        std::atomic<double> _lastPTS;
         std::atomic<bool> _seeking;
         std::atomic<bool> _pushFrameOnDecode;
         std::atomic<bool> flushBuffers;
