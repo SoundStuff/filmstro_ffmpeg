@@ -76,6 +76,9 @@ public:
 
     /** Get the video source for the component - TODO: this locks the weak ptr - should it? */
     std::shared_ptr<FFmpegVideoReader> getVideoReader () const;
+  
+    int getFrameWidth();
+    int getFrameHeight();
 
 private:
     /** Format the timecode in seconds */
@@ -91,6 +94,9 @@ private:
     FFmpegVideoScaler                       videoScaler;
 
     bool                                    dirty;
+  
+    int frameWidth;
+    int frameHeight;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FFmpegVideoComponent)
 };

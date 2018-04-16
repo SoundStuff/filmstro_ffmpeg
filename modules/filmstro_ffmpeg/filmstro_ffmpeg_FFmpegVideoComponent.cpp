@@ -69,15 +69,15 @@ void FFmpegVideoComponent::resized ()
     if (videoSource) {
         double aspectRatio = videoSource->getVideoAspectRatio() * videoSource->getVideoPixelAspect();
         if (aspectRatio > 0) {
-            double w = getWidth();
-            double h = getHeight();
-            if (w / h > aspectRatio) {
-                w = h * aspectRatio;
+            frameWidth = getWidth();
+            frameHeight = getHeight();
+            if (frameWidth / frameHeight > aspectRatio) {
+                frameWidth = frameHeight * aspectRatio;
             }
             else {
-                h = w / aspectRatio;
+                frameHeight = frameWidth / aspectRatio;
             }
-            frameBuffer = Image (Image::PixelFormat::ARGB, static_cast<int> (w), static_cast<int> (h), true);
+            frameBuffer = Image (Image::PixelFormat::ARGB, frameWidth, frameHeight, true);
             videoScaler.setupScaler (videoSource->getVideoWidth(),
                                      videoSource->getVideoHeight(),
                                      videoSource->getPixelFormat(),
@@ -148,4 +148,14 @@ void FFmpegVideoComponent::setVideoReader (std::shared_ptr<FFmpegVideoReader> so
 std::shared_ptr<FFmpegVideoReader> FFmpegVideoComponent::getVideoReader () const
 {
     return videoSourceWeak.lock();
+}
+
+int FFmpegVideoComponent::getFrameWidth()
+{
+  return frameWidth;
+}
+
+int FFmpegVideoComponent::getFrameHeight()
+{
+  return frameHeight;
 }
