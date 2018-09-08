@@ -1,4 +1,4 @@
-/*
+ /*
  ==============================================================================
  Copyright (c) 2017, Filmstro Ltd. - Daniel Walz
  All rights reserved.
@@ -50,7 +50,7 @@
 // enable this to print a DBG statement for each packet containing stream ID and timestamp
 //#define DEBUG_LOG_PACKETS
 //#define DEBUG_LOG_VIDEO_PACKETS
-//#define DEBUG_LOGIC_FLOW  //THIS WILL LOG ON getNextAudioBlock() - USE WISELY
+//#define DEBUG_LOGIC_FLOW  //THIS WILL LOG A LOT ON getNextAudioBlock() - USE WISELY
 
 FFmpegVideoReader::FFmpegVideoReader (const int audioFifoSize, const int videoFifoSize)
 :  looping                 (false),
@@ -210,6 +210,8 @@ void FFmpegVideoReader::prepareToPlay (int samplesPerBlockExpected, double newSa
 {
     const int numChannels = getVideoChannels();
     sampleRate = getVideoSamplingRate();
+    if (sampleRate == 0)
+      sampleRate = newSampleRate;
     
     audioFifo.setSize (numChannels, 192000);
     
@@ -227,6 +229,7 @@ void FFmpegVideoReader::getNextAudioBlock (const juce::AudioSourceChannelInfo &b
     currentTimeStamp += (bufferToFill.numSamples / videoSampleRate);
     
     // this triggers also reading of new video frame
+  jassert(sampleRate > 0);
     decoder.setCurrentPTS (static_cast<double>(nextReadPos) / sampleRate);
 #ifdef DEBUG_LOG_PACKETS
     DBG ("Play audio block: " + String (nextReadPos) + " PTS: " + String (static_cast<double>(nextReadPos) / sampleRate));
@@ -488,7 +491,12 @@ int FFmpegVideoReader::DecoderThread::decodeAudioPacket (AVPacket packet)
         }
         
         int64_t framePTS = av_frame_get_best_effort_timestamp (audioFrame);
-        double  framePTSsecs = static_cast<double> (framePTS) / audioContext->sample_rate;
+      
+        double  framePTSsecs;
+        if (audioContext)
+          framePTSsecs = static_cast<double> (framePTS) / audioContext->sample_rate;
+        else
+          framePTSsecs = static_cast<double> (framePTS) / systemSampleRate;
         
 #ifdef DEBUG_LOG_PACKETS
         DBG ("Stream " + String (packet.stream_index) +
@@ -537,34 +545,51 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
         int got_picture = 0;
         AVFrame* frame = videoFrames [videoFifoWrite].second;
         
-        if (avcodec_decode_video2 (videoContext, frame, &got_picture, &packet) > 0) {
-            
-            int64_t pts = av_frame_get_best_effort_timestamp (frame);
-            //check for bad pts... unless dts is less than 0
-            if (packet.dts >= 0 && (pts == AV_NOPTS_VALUE || pts < 0))
-                pts = packet.pts;
-            
-            
-            AVRational timeBase = av_make_q (1, AV_TIME_BASE);
-            if (isPositiveAndBelow(videoStreamIdx, static_cast<int> (formatContext->nb_streams))) {
-                timeBase = formatContext->streams [videoStreamIdx]->time_base;
-            }
-            pts_sec = av_q2d (timeBase) * static_cast<double>(pts);
-            
-            
-            if (pts_sec >= 0.0)
+        //if (avcodec_decode_video2 (videoContext, frame, &got_picture, &packet) > 0) {
+        int send_err = avcodec_send_packet(videoContext, &packet);
+        {
+          int recv_err = avcodec_receive_frame(videoContext, frame);
             {
-                videoFrames [videoFifoWrite].first = pts_sec;
-                videoFifoWrite = ++videoFifoWrite % videoFrames.size();
-              
-                if (_pushFrameOnDecode && pts_sec >=  currentPTS.load() && _seeking == false)
-                //_seeking should be reset before pushing; if it's true then we're still not ready to push
-                {
-                    if (pushLatestFrame())
-                        _pushFrameOnDecode = false;
-                }
-            }
+          
+              int64_t pts;
             
+              if (packet.dts != AV_NOPTS_VALUE) {
+                pts = av_frame_get_best_effort_timestamp(frame);
+              } else {
+                pts = 0;
+              }
+            
+  //            //check for bad pts... unless dts is less than 0
+  //            if (packet.dts >= 0 && (pts == AV_NOPTS_VALUE || pts < 0))
+  //                pts = packet.pts;
+            
+              
+              AVRational timeBase = av_make_q (1, AV_TIME_BASE);
+              if (isPositiveAndBelow(videoStreamIdx, static_cast<int> (formatContext->nb_streams))) {
+                  timeBase = formatContext->streams [videoStreamIdx]->time_base;
+              }
+              pts_sec = av_q2d (timeBase) * static_cast<double>(pts);
+              currentDTS = pts_sec; //so we know how best to seek?
+            
+              
+              if (pts_sec >= 0.0 && pts_sec >= jmax(0.0, currentPTS.load() - 0.05)) //only load frames if they're within ~3 frames of the target pos
+              {
+                  videoFrames [videoFifoWrite].first = pts_sec;
+                  videoFifoWrite = ++videoFifoWrite % videoFrames.size();
+                
+                  if (_pushFrameOnDecode && pts_sec >=  currentPTS.load() && _seeking == false)
+                  //_seeking should be reset before pushing; if it's true then we're still not ready to push
+                  {
+                      if (pushLatestFrame())
+                          _pushFrameOnDecode = false;
+                  }
+              }
+            }
+            //else
+            {
+              //DBG("receive frame error");
+            }
+          
             
 #ifdef DEBUG_LOG_VIDEO_PACKETS
             DBG ("Stream " + String (packet.stream_index) +
@@ -572,16 +597,16 @@ double FFmpegVideoReader::DecoderThread::decodeVideoPacket (AVPacket packet)
                  " DTS: " + String (packet.dts) +
                  " PTS: " + String (packet.pts) +
                  " best effort PTS: " + String (pts) +
-                 " in ms: " + String (pts_sec) +
+                 " in seconds: " + String (pts_sec) +
                  " timebase: " + String (av_q2d(timeBase)));
 #endif /* DEBUG_LOG_VIDEO_PACKETS */
             
             
             
         }
-        else
+        //else
         {
-            jassertfalse;
+            //jassertfalse;
             /* @return 0 on success, otherwise negative error code:
              *      AVERROR(EAGAIN):   input is not accepted in the current state - user
              *                         must read output with avcodec_receive_frame() (once
@@ -604,38 +629,83 @@ void FFmpegVideoReader::DecoderThread::run()
     int error = 0;
     _pushFrameOnDecode = true;
     while (!threadShouldExit()) {
-        int decodedFrames = (videoFrames.size() + videoFifoWrite - videoFifoRead) % videoFrames.size();
+      
+      
+      /*OVERVIEW for NEW CODE?
+       1.  are we seeking?
+       1b. is the seek within decent decoding range? keep decoding OR flush+seek
+       2.  how much room is there in the audio and video fifo
+       3.  if there's room, then decode some packets
+       4.  wait for a bit to throttle decoding some
+       */
+      
+      if (videoContext || audioContext)
+      {
         
-//        if (flushBuffers)
-//        {
-//            avcodec_flush_buffers(videoContext);
-//            flushBuffers = false;
-//        }
+      }
+      //if seeking AND there's a video and/or audio context
+      //get the read position based on framerate or preferable sample rate
+      //is there room and time to decode to the seek position?
+        //decode away!
+      //or should we seek to it
+        //if earlier - seek backward and then forward to the frame
+        //if later - seek forward
+      
+      //read packet and then decode audio/video
+      
+      //OLD CODE FROM HERE ON
+      
+        int decodedFrames = (videoFrames.size() + videoFifoWrite - videoFifoRead) % videoFrames.size();
       
         //if we're seeking!
-        if (audioContext && _seeking) {
+        if ((videoContext || audioContext) && _seeking) {
 #ifdef DEBUG_LOGIC_FLOW
             DBG(String("Decoder Logic: SEEKING to {0}").replace("{0}", String(currentPTS.load())));
 #endif
-            //HAL: seek to the desired position and go back a few frames...
-            int64_t readPos = (currentPTS.load() - (0.1)) * audioContext->sample_rate;
+          
             //videoContext->ticks_per_frame * AV_TIME_BASE ??
-            
             //AV_TIME_BASE
             //int flags = (targetPosition is before currentPosition) ? AVSEEK_FLAG_BACKWARD : 0;
-            
             //SoundStuff: AVSEEK_FLAG_BACKWARD will seek to a keyframe before the desired position
-            int result = av_seek_frame (formatContext, audioStreamIdx, readPos, AVSEEK_FLAG_BACKWARD);
-            if (result < 0)
+          
+            int result;
+            int stream_idx = audioContext ? audioStreamIdx : videoStreamIdx;
+            int64_t readPos;
+            if (audioContext)
             {
-                jassertfalse;
+              readPos = (currentPTS.load()) * audioContext->sample_rate;
             }
+            else
+            {
+              readPos = (currentPTS.load()) * av_q2d(formatContext->streams[videoStreamIdx]->time_base); //(videoContext->ticks_per_frame * av_q2d(videoContext->time_base));
+            }
+          
+//          if (currentDTS.load() > currentPTS.load())
+//          {
+//            //avcodec_flush_buffers(videoContext);
+//            result = av_seek_frame(formatContext, stream_idx, readPos, AVSEEK_FLAG_FRAME | AVSEEK_FLAG_BACKWARD);
+//          }
+//          else
+          {
+            result = av_seek_frame(formatContext, stream_idx, readPos, AVSEEK_FLAG_BACKWARD);
+          }
+          
+          if (result < 0)
+          {
+            jassertfalse;
+          }
             _seeking = false;
-            avcodec_flush_buffers(videoContext);
         }
-        
-    
-        if (audioFifo.getFreeSpace() > 2048 && (audioFifo.getNumReady() < 4096 || decodedFrames < videoFrames.size() - 2)) {
+      
+        bool should_decode = true;
+        if (audioContext)
+          should_decode = (audioFifo.getFreeSpace() > 2048 /*&& audioFifo.getNumReady() < 4096*/) &&
+            (decodedFrames < videoFrames.size() - 2);
+        else
+          should_decode = decodedFrames < videoFrames.size() - 2;
+      
+        if (should_decode)
+        {
             
 #ifdef DEBUG_LOG_PACKETS
             DBG ("Audio: " + String (audioFifo.getNumReady()) + " ready, "
@@ -658,7 +728,7 @@ void FFmpegVideoReader::DecoderThread::run()
                     decodeVideoPacket (packet);
                 }
                 else {
-                    //DBG ("Packet is neither audio nor video... stream: " + String (packet.stream_index));
+                    DBG ("Packet is neither audio nor video... stream: " + String (packet.stream_index));
                 }
             }
             av_packet_unref (&packet);
@@ -690,7 +760,7 @@ void FFmpegVideoReader::DecoderThread::setCurrentPTS (const double pts, bool see
             videoFrames [i].first = 0.0;
         }
         _seeking = seek;
-        currentPTS = pts;
+        currentPTS = pts; //TODO: testing
         _pushFrameOnDecode = true;
         
         //the decode thread has an internal wait to pace itself. If we are seeking, then skip that wait and begin decoding asap
@@ -710,6 +780,7 @@ void FFmpegVideoReader::DecoderThread::setCurrentPTS (const double pts, bool see
 //potentially called from any thread
 bool FFmpegVideoReader::DecoderThread::pushLatestFrame()
 {
+  
 #ifdef DEBUG_LOGIC_FLOW
     DBG(String("Decoder Logic: Attempting to push a decoded frame for pts: {0}").replace("{0}", String(currentPTS.load())));
 #endif
@@ -717,18 +788,20 @@ bool FFmpegVideoReader::DecoderThread::pushLatestFrame()
     auto availableFrames = (videoFrames.size() + videoFifoWrite - videoFifoRead) % videoFrames.size();
     if (availableFrames < 1) {
         // No frame read!
+      
 #ifdef DEBUG_LOGIC_FLOW
         DBG("Decoder Logic: No decoded frames available!");
 #endif
+      
         return false;
     }
     
     //SoundStuff: replaced ambiguous '''auto read = videoFifoRead;'''
-    
     int read = videoFifoRead.load();
 
     // find best frame PTS < currentPTS
     auto bestFramePos = -1;
+    int droppedFrames = 0;
     for (auto i = 0; i < availableFrames; i++)
     {
         int iterFrame = (read + i) % videoFrames.size();
@@ -739,6 +812,7 @@ bool FFmpegVideoReader::DecoderThread::pushLatestFrame()
             {
                 DBG (String("Decoder Logic: SKIPPED frame with pts: {0}")
                  .replace("{0}", String(videoFrames[iterFrame].first)));
+              droppedFrames++;
             }
 #endif
             bestFramePos = iterFrame;
@@ -747,34 +821,38 @@ bool FFmpegVideoReader::DecoderThread::pushLatestFrame()
     
     if (bestFramePos > -1 && videoFrames[bestFramePos].first != _lastPTS.load())
     {
+      
 #ifdef DEBUG_LOGIC_FLOW
         DBG (String("Decoder Logic: CANDIDATE frame found with pts: {0}")
              .replace("{0}", String(videoFrames[bestFramePos].first)));
 #endif
-        if (bestFramePos > 1) {
+      
+        if (droppedFrames > 0) {
+          
 #ifdef DEBUG_LOGIC_FLOW
-            DBG (String("Decoder Logis: Dropped {0} frame(s)")
-                 .replace("{0}", String (bestFramePos-1)));
+            DBG (String("Decoder Logic: Dropped {0} frame(s)")
+                 .replace("{0}", String (droppedFrames)));
 #endif
+          
         }
         _lastPTS = videoFrames[bestFramePos].first;
         videoFifoRead = (bestFramePos) % videoFrames.size();
         AVFrame* nextFrame = videoFrames [videoFifoRead].second;
         videoListeners.call (&FFmpegVideoListener::displayNewFrame, nextFrame);
+      
 #ifdef DEBUG_LOGIC_FLOW
         DBG(String("Decoder Logic: SUCCESS - pushed frame with pts: {0} for currentPTS: {1}")
             .replace("{0}", String(videoFrames[videoFifoRead].first))
             .replace("{1}", String(currentPTS.load())));
 #endif
       
-      return true;
+        return true;
     }
     else
     {
 #ifdef DEBUG_LOGIC_FLOW
-        DBG("Decoder Logic: FAILED - could not find suitable frame");
+        DBG("Decoder Logic: no frame to push");
 #endif
-      
       return false;
     }
      
@@ -856,9 +934,9 @@ double FFmpegVideoReader::DecoderThread::getFramesPerSecond () const
         return av_q2d (videoContext->framerate);
     }
     if (formatContext && isPositiveAndBelow (videoStreamIdx, static_cast<int> (formatContext->nb_streams))) {
-        AVRational tb = formatContext->streams [videoStreamIdx]->time_base;
+        AVRational tb = formatContext->streams [videoStreamIdx]->avg_frame_rate;
         if (tb.num > 0) {
-            return av_q2d (av_inv_q (tb));
+            return av_q2d (tb);
         }
     }
     return 0;
@@ -901,6 +979,21 @@ AVCodecContext* FFmpegVideoReader::DecoderThread::getSubtitleContext () const
     return subtitleContext;
 }
 
+void FFmpegVideoReader::DecoderThread::setSystemSampleRate(double newSystemSampleRate)
+{
+  systemSampleRate = newSystemSampleRate;
+}
+
+int FFmpegVideoReader::DecoderThread::getFrameDecodePos()
+{
+  return videoFifoWrite.load();
+}
+
+int FFmpegVideoReader::DecoderThread::getFramePresentPos()
+{
+  return videoFifoRead.load();
+}
+
 //HAL NOTES
 /*
  int sendPacketResult;
@@ -909,3 +1002,9 @@ AVCodecContext* FFmpegVideoReader::DecoderThread::getSubtitleContext () const
  }
  }
  */
+
+void FFmpegVideoReader::getReaderStats(int & framePresentPos, int & frameDecodePos)
+{
+  framePresentPos = decoder.getFramePresentPos();
+  frameDecodePos = decoder.getFrameDecodePos();
+}

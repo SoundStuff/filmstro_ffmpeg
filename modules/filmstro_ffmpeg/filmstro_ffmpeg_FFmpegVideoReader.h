@@ -131,7 +131,12 @@ public:
         AVCodecContext* getVideoContext () const;
         AVCodecContext* getAudioContext () const;
         AVCodecContext* getSubtitleContext () const;
-        
+      
+        void setSystemSampleRate(double newSystemSampleRate);
+        int getFrameDecodePos();
+        int getFramePresentPos();
+        int getFrameFifoSize();
+      
     private:
         
         int openCodecContext (AVCodecContext** decoderContext,
@@ -170,11 +175,13 @@ public:
         AVFrame*            audioFrame;
         
         std::atomic<double> currentPTS;
+        std::atomic<double> currentDTS;
         std::atomic<double> _lastPTS;
         std::atomic<bool> _seeking;
         std::atomic<bool> _pushFrameOnDecode;
         std::atomic<bool> flushBuffers;
-        
+        std::atomic<double> systemSampleRate;
+      
         
         juce::ListenerList<FFmpegVideoListener> videoListeners;
         
@@ -246,7 +253,10 @@ public:
     AVRational getVideoTimeBase () const;
     
     static juce::String formatTimeCode (const double tc);
-    
+  
+    //debug stuff
+    void getReaderStats(int & framePresentPos, int & frameDecodePos);
+      
     
     // ==============================================================================
     // from PositionableAudioSource
@@ -297,7 +307,7 @@ private:
     bool        looping;
     
     double      sampleRate;
-    
+  
     double      framesPerSec;
     
     double      resampleFactor;

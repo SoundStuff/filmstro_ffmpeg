@@ -117,7 +117,7 @@ void FFmpegVideoComponent::paint (juce::Graphics& g)
 void FFmpegVideoComponent::displayNewFrame (const AVFrame* frame)
 {
     if (dirty) {
-        DBG ("Frame not painted: " + String (av_frame_get_best_effort_timestamp (frame)));
+        //DBG ("Frame not painted: " + String (av_frame_get_best_effort_timestamp (frame)));
     }
     currentFrame = frame;
     dirty = true;
