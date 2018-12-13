@@ -324,6 +324,7 @@ formatContext       (nullptr),
 videoContext        (nullptr),
 audioContext        (nullptr),
 subtitleContext     (nullptr),
+audioConverterContext   (nullptr),
 videoStreamIdx      (-1),
 audioStreamIdx      (-1),
 subtitleStreamIdx   (-1),
@@ -376,10 +377,21 @@ bool FFmpegVideoReader::DecoderThread::loadMovieFile (const juce::File& inputFil
     // open the streams
     audioStreamIdx = openCodecContext (&audioContext, AVMEDIA_TYPE_AUDIO, true);
     if (isPositiveAndBelow (audioStreamIdx, static_cast<int> (formatContext->nb_streams))) {
-        audioContext->request_sample_fmt = AV_SAMPLE_FMT_FLTP;
-        //audioContext->request_channel_layout = AV_CH_LAYOUT_STEREO_DOWNMIX;
+      uint64_t channel_layout = formatContext->streams [audioStreamIdx]->codecpar->channel_layout;
+      audioConverterContext = swr_alloc_set_opts(NULL,  // we're allocating a new context
+                                                 channel_layout,  // out_ch_layout
+                                                 AV_SAMPLE_FMT_FLTP,    // out_sample_fmt
+                                                 audioContext->sample_rate,  // out_sample_rate
+                                                 channel_layout, // in_ch_layout
+                                                 audioContext->sample_fmt,   // in_sample_fmt
+                                                 audioContext->sample_rate,  // in_sample_rate
+                                                 0,                    // log_offset
+                                                 NULL);                // log_ctx
+      ret = swr_init(audioConverterContext);
+      if(ret < 0)
+        fprintf(stderr, "Error initialising audio converter: %s\n", av_err2str(ret));
     }
-    
+  
     videoStreamIdx = openCodecContext (&videoContext, AVMEDIA_TYPE_VIDEO, true);
     if (isPositiveAndBelow (videoStreamIdx, static_cast<int> (formatContext->nb_streams))) {
         videoListeners.call (&FFmpegVideoListener::videoSizeChanged, videoContext->width,
@@ -414,6 +426,10 @@ void FFmpegVideoReader::DecoderThread::closeMovieFile ()
     if (subtitleStreamIdx >= 0) {
         avcodec_free_context (&subtitleContext);
         subtitleStreamIdx = -1;
+    }
+    if(audioConverterContext)
+    {
+      swr_free(&audioConverterContext);
     }
     avformat_close_input (&formatContext);
 }
@@ -480,13 +496,20 @@ int FFmpegVideoReader::DecoderThread::decodeAudioPacket (AVPacket packet)
     int got_frame = 0;
     int decoded   = packet.size;
     int outputNumSamples    = 0;
+  
+    int response = avcodec_send_packet(audioContext, &packet);
     
     // decode audio frame
-    do {
-        // call decode until packet is empty
-        int ret = avcodec_decode_audio4 (audioContext, audioFrame, &got_frame, &packet);
-        if (ret < 0) {
-            DBG ("Error decoding audio frame: (Code " + String (ret) + ")");
+    while (response >= 0) {
+        response = avcodec_receive_frame(audioContext, audioFrame);
+        if (response == AVERROR(EAGAIN) || response == AVERROR_EOF)
+        {
+            break;
+        } else if (response < 0)
+        {
+  #ifdef DEBUG_LOG_PACKETS
+        DBG("Error while receiving a frame from the decoder:" + String(av_err2str(response)));
+  #endif /* DEBUG_LOG_PACKETS */
             break;
         }
         
@@ -506,34 +529,26 @@ int FFmpegVideoReader::DecoderThread::decodeAudioPacket (AVPacket packet)
              " Frame PTS: " + String (framePTS));
 #endif /* DEBUG_LOG_PACKETS */
         
-        /* Some audio decoders decode only part of the packet, and have to be
-         * called again with the remainder of the packet data.
-         * Sample: fate-suite/lossless-audio/luckynight-partial.shn
-         * Also, some decoders might over-read the packet. */
-        decoded = jmin (ret, packet.size);
-        
-        packet.data += decoded;
-        packet.size -= decoded;
-        
-        if (got_frame && decoded > 0 && audioFrame->extended_data != nullptr) {
+         if (audioFrame->extended_data != nullptr) {
             const int channels   = av_get_channel_layout_nb_channels (audioFrame->channel_layout);
             const int numSamples = audioFrame->nb_samples;
-            
+            audioConvertBuffer.setSize(channels, numSamples, false, false, true);
             int offset = (currentPTS - framePTSsecs) * audioContext->sample_rate;
             if (offset > 100) {
                 if (offset < numSamples) {
+                    swr_convert(audioConverterContext, (uint8_t**)audioConvertBuffer.getArrayOfWritePointers(), numSamples, (const uint8_t**)audioFrame->extended_data, numSamples);
                     outputNumSamples = numSamples-offset;
-                    AudioBuffer<float> subset ((float* const*)audioFrame->extended_data, channels, offset, outputNumSamples);
-                    audioFifo.addToFifo (subset);
+                    audioFifo.addToFifo(audioConvertBuffer, outputNumSamples, offset);
                 }
             }
             else {
                 outputNumSamples = numSamples;
-                audioFifo.addToFifo ((const float **)audioFrame->extended_data, numSamples);
+                swr_convert(audioConverterContext, (uint8_t**)audioConvertBuffer.getArrayOfWritePointers(), numSamples, (const uint8_t**)audioFrame->extended_data, numSamples);
+                audioFifo.addToFifo (audioConvertBuffer);
             }
         }
         
-    } while (got_frame && packet.size > 0);
+    }
     
     return outputNumSamples;
 }
